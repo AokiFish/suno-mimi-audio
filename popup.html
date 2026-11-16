@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>suno mimi audio</title>
+<style>
+  :root {
+    --green: #164c37;
+    --green-btn: #1b6a4a;
+    --bg: #eff2e9;
+    --card: #f8faf4;
+    --line: #dbe3d2;
+    --muted: #7c8877;
+  }
+  * { box-sizing: border-box; }
+  body {
+    width: 344px;
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--green);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px;
+  }
+
+  header { position: relative; display: flex; gap: 10px; align-items: flex-start; margin-bottom: 16px; }
+  .logo { width: 46px; height: 46px; flex: none; border-radius: 10px; background: var(--green); display: flex; align-items: center; justify-content: center; }
+  .brand h1 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 19px; font-weight: 700; letter-spacing: .2px; }
+  .brand p { margin: 2px 0 0; font-size: 11px; font-style: italic; color: var(--muted); }
+  .version { position: absolute; top: 3px; right: 0; font-size: 10px; color: #9aa693; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+
+  .capture { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; margin-bottom: 16px; }
+  .capture .label { font-weight: 700; font-size: 13px; }
+  .capture .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .toggle { width: 42px; height: 23px; border-radius: 12px; border: none; background: #c4ccc0; cursor: pointer; position: relative; flex: none; padding: 0; }
+  .toggle.on { background: var(--green-btn); }
+  .toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 19px; height: 19px; border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
+  .toggle.on::after { left: 21px; }
+
+  .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .section-head .left { display: flex; align-items: center; gap: 6px; }
+  .section-head .title { font-weight: 700; font-size: 13px; }
+  .badge { background: #dde6d5; color: var(--green); border-radius: 5px; font-size: 11px; font-weight: 700; padding: 1px 6px; line-height: 1.5; }
+
+  .track { padding: 12px; margin-bottom: 10px; }
+  .track-head { display: flex; align-items: flex-start; justify-content: space-between; }
+  .track .title { font-size: 13px; font-weight: 700; }
+  .track .meta { font-size: 11px; color: var(--muted); margin: 3px 0 10px; }
+  .track .actions { display: flex; gap: 8px; align-items: center; }
+  .track input { flex: 1; min-width: 0; padding: 7px 9px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--green); }
+  .rm { background: none; border: none; color: var(--muted); font-size: 17px; line-height: 1; cursor: pointer; padding: 0; }
+
+  button.primary { border: none; border-radius: 6px; background: var(--green-btn); color: #fff; font-size: 12px; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+  button.primary:disabled { background: #b9c4b4; cursor: default; }
+  button.primary.small { font-size: 11px; padding: 4px 9px; }
+  .head-actions { display: flex; align-items: center; gap: 10px; }
+  button.link { background: none; border: none; color: var(--green-btn); font-size: 11px; cursor: pointer; padding: 0; text-decoration: none; }
+
+  .open-prompt { padding: 8px 0 24px; }
+  .open-prompt h2 { font-family: Georgia, "Times New Roman", serif; font-size: 20px; font-weight: 700; margin: 0 0 8px; }
+  .open-prompt p { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0 0 14px; }
+
+  .empty-state { text-align: center; padding: 18px 16px 14px; }
+  .empty-icon { width: 40px; height: 40px; border-radius: 50%; background: #e6ede0; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px; }
+  .empty-title { font-family: Georgia, "Times New Roman", serif; font-size: 15px; font-weight: 700; color: var(--green); margin-bottom: 4px; }
+  .empty-desc { font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+  .note { font-size: 10px; color: var(--muted); margin: 14px 0 10px; }
+  footer { display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: var(--muted); }
+  footer a { color: var(--green-btn); text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 48 48" width="38" height="38" aria-hidden="true">
+      <g fill="none" stroke="#e3efe0" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M15 17 L14 6 L20.5 11 Q24 10.3 27.5 11 L34 6 L33 17 Q34 23 24 25 Q14 23 15 17 Z"/>
+        <path d="M18 25.5 Q13 29 13.5 33 L34.5 33 Q35 29 30 25.5"/>
+        <path d="M34 31 Q41 31 41 23 Q41 18.5 37.5 19"/>
+      </g>
+      <path d="M22.5 17.5 L25.5 17.5 L24 19.5 Z" fill="#eda9b8"/>
+      <text x="24" y="45" fill="#e3efe0" font-family="Georgia, 'Times New Roman', serif" font-size="10" font-weight="700" text-anchor="middle">mimi</text>
+    </svg>
+  </div>
+  <div class="brand">
+    <h1>suno mimi audio</h1>
+    <p>Your music, ready to keep.</p>
+  </div>
+  <span class="version">1.0</span>
+</header>
+
+<!-- State 1: no Suno tab open -->
+<div id="open-prompt" class="open-prompt" style="display:none">
+  <h2>Open a Suno tab</h2>
+  <p>Open Suno and play a song. Captures stay with the tab — you don't need to play the whole song.</p>
+  <button class="primary" id="open-suno">Open Suno</button>
+</div>
+
+<!-- States 2 & 3: Suno tab open -->
+<div id="suno-panel" style="display:none">
+  <div class="capture card">
+    <div>
+      <div class="label" id="capture-label">Capture is on</div>
+      <div class="hint">Play a song to start.</div>
+    </div>
+    <button class="toggle on" id="capture-toggle" aria-label="Capture toggle"></button>
+  </div>
+
+  <div class="section-head">
+    <div class="left">
+      <span class="title">Captured tracks</span>
+      <span class="badge" id="count-badge">0</span>
+    </div>
+    <div class="head-actions">
+      <button class="primary small" id="download-all" disabled>Download all</button>
+      <button class="link" id="clear-all">Clear all</button>
+    </div>
+  </div>
+
+  <!-- State 2: Suno open, no track captured yet -->
+  <div id="empty-state" class="empty-state" style="display:none">
+    <div class="empty-icon">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M9 18V5l10-2v13" fill="none" stroke="#1b6a4a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <ellipse cx="6.5" cy="18" rx="2.6" ry="2" fill="#1b6a4a"/>
+        <ellipse cx="16.5" cy="16" rx="2.6" ry="2" fill="#1b6a4a"/>
+      </svg>
+    </div>
+    <div class="empty-title">Give it a little music.</div>
+    <div class="empty-desc">Start a song on the tab. A complete copy will appear here, ready to save.</div>
+  </div>
+
+  <!-- State 3: tracks captured -->
+  <div id="track-list"></div>
+
+  <div class="note">Save before closing or reloading the Suno tab.</div>
+</div>
+
+<footer>
+  <span>• Kept in this tab · No uploads</span>
+  <a href="help.html" target="_blank">Help</a>
+</footer>
+
+<script src="popup.js"></script>
+</body>
+</html>

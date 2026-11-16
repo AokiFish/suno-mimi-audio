@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="128" height="128">
+  <rect x="0" y="0" width="48" height="48" rx="10" fill="#164c37"/>
+  <g fill="none" stroke="#e3efe0" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 17 L14 6 L20.5 11 Q24 10.3 27.5 11 L34 6 L33 17 Q34 23 24 25 Q14 23 15 17 Z"/>
+    <path d="M18 25.5 Q13 29 13.5 33 L34.5 33 Q35 29 30 25.5"/>
+    <path d="M34 31 Q41 31 41 23 Q41 18.5 37.5 19"/>
+  </g>
+  <path d="M22.5 17.5 L25.5 17.5 L24 19.5 Z" fill="#eda9b8"/>
+  <text x="24" y="45" fill="#e3efe0" font-family="Georgia, 'Times New Roman', serif" font-size="10" font-weight="700" text-anchor="middle">mimi</text>
+</svg>
