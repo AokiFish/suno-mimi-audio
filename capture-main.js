@@ -320,6 +320,7 @@
   // because Suno buffers the whole track into MSE within seconds of play.
   function finalizeTrack(tr) {
     if (!tr || tr.status !== 'Capturing' || tr.bytes <= 0) return;
+    if (tr._warming) return; // don't finish while waiting for the preload seek
     tr.status = 'Ready to save';
     clearTimer(tr);
     postUpdate();
@@ -327,6 +328,7 @@
 
   function armQuietTimer(tr) {
     if (tr.timer) clearTimeout(tr.timer);
+    if (tr._warming) return; // quiet timer starts after warmup/seek completes
     tr.timer = setTimeout(function () {
       if (tr.status === 'Capturing' && tr.bytes > 0) finalizeTrack(tr);
     }, QUIET_MS);
@@ -565,6 +567,8 @@
   var SEEK_MAX_TRIES = 16;        // retry while duration is still unknown
   var SEEK_RETRY_MS = 250;
   var SEEK_FROM_END = 0.25;       // seconds before end to seek to
+  var SEEK_WARMUP_MS = 3000;      // let the player buffer normally before seeking —
+                                  // seeking instantly races MSE init and causes re-init duplicates
   var lastSeekSig = '';           // global throttle: avoid re-seeking same song
   var lastSeekAt = 0;
   var SEEK_THROTTLE_MS = 8000;    // ignore repeat seeks for the same song within 8 s
@@ -630,7 +634,17 @@
     lastSeekAt = now;
     seekAttempts = 0;
     seekTrack = tr;
-    setTimeout(seekToEnd, 120);
+    // Warm up: let the player append segments normally for a few seconds so
+    // its MediaSource pipeline is stable, THEN seek. Suppress the quiet timer
+    // during warmup so the track isn't finalized before the seek happens.
+    tr._warming = true;
+    clearTimer(tr);
+    setTimeout(function () {
+      tr._warming = false;
+      seekToEnd();
+      // If the seek never produced new appends, let the quiet timer finish it.
+      if (tr.status === 'Capturing') armQuietTimer(tr);
+    }, SEEK_WARMUP_MS);
   }
 
   // Download one track in page origin: build blob URL here (MAIN world), click
