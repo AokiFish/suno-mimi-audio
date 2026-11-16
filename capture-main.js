@@ -120,12 +120,11 @@
   var TITLE_MAX_AGE = 300000; // remember the clicked name for 5 min
   var TITLE_ATTACH_MS = 5000; // a name arriving this soon after a track may fill it
 
-  // Session gate: ONE click == ONE song. Every init segment arriving inside
-  // the session window belongs to that song (auto-seek re-inits included), so
-  // a single click can never spawn two tracks. The next click opens a new one.
-  var sessionTrackId = null;
-  var sessionStart = 0;
-  var SESSION_WINDOW_MS = 12000;
+  // The player plays ONE song at a time. All appended data belongs to the
+  // current track until the user clicks a different song. Re-inits from auto-
+  // seek, new SourceBuffers, etc. are all the same song — never new tracks.
+  var activeTrackId = null;
+  var ACTIVE_GRACE_MS = 15000; // a finished track stays "current" this long
 
   function goodTitle(s) {
     if (typeof s !== 'string') return false;
@@ -203,11 +202,14 @@
   //  - otherwise hold it for the next track to snapshot.
   // Either way the name is consumed (cleared) so it can never be reused by a
   // later song — that reuse was the "all songs share the first name" bug.
-  // A real song click starts a fresh session: clear which track belongs to it.
-  // Called only when a click yields a song name (i.e. clicked a song card).
+  // The user clicked a different song: end the current track so the next init
+  // can create a new one. Driven by a recognized song click (title found) —
+  // clicking play/pause of the SAME song yields no title and won't split it.
   function openSession() {
-    sessionTrackId = null;
-    sessionStart = Date.now();
+    if (activeTrackId && tracks[activeTrackId]) {
+      finalizeTrack(tracks[activeTrackId]);
+    }
+    activeTrackId = null;
   }
 
   function setSongTitle(t) {
@@ -245,14 +247,17 @@
         if (goodTitle(line) && line.length <= 80) { found = line; break; }
       }
     }
+    var txt = ((e.target.innerText || e.target.textContent || '') + '').trim().slice(0, 60);
     clickLog.push({
       tag: (e.target.tagName || '').toLowerCase(),
-      text: ((e.target.innerText || e.target.textContent || '') + '').trim().slice(0, 60),
-      title: found || null,
-      at: Date.now()
+      text: txt, title: found || null, at: Date.now()
     });
     if (clickLog.length > 20) clickLog.shift();
-    if (found) { openSession(); setSongTitle(found); }
+    // A click on something with text inside the song list is a song selection.
+    // Open a new session even if we failed to read the exact name — switching
+    // songs must never depend on title extraction succeeding.
+    if (txt && txt.length >= 2) openSession();
+    if (found) setSongTitle(found);
   }, true);
 
   // NOTE: the earlier fetch/XHR title scrape was removed. It grabbed the first
@@ -322,6 +327,7 @@
     if (!tr || tr.status !== 'Capturing' || tr.bytes <= 0) return;
     if (tr._warming) return; // don't finish while waiting for the preload seek
     tr.status = 'Ready to save';
+    tr.endedAt = Date.now();
     clearTimer(tr);
     postUpdate();
   }
@@ -399,39 +405,27 @@
     var id = sbToSession.get(sb);
     var tr = id ? tracks[id] : null;
 
-    // Session gate: if this click's song already has a track, ANY init arriving
-    // in the window is that same song being re-initialized by auto-seek. Bind
-    // it to the session track and skip the duplicate init — never spawn a new
-    // track. This is based on the click (a real event), not on guessing bytes.
-    if (isInit && sessionTrackId && tracks[sessionTrackId] &&
-        (Date.now() - sessionStart < SESSION_WINDOW_MS)) {
-      var sess = tracks[sessionTrackId];
-      sess._seekDone = true;
-      sbToSession.set(sb, sess.id);
-      if (timing) { sess.duration = timing.duration; sess.timescale = timing.timescale; }
-      // A re-init may arrive after the quiet timer marked it Ready; reopen it.
-      if (sess.status !== 'Capturing' && sess.status !== 'Incomplete') sess.status = 'Capturing';
-      armQuietTimer(sess);
+    // The player plays ONE song at a time. While a current track exists and is
+    // still fresh, EVERY init belongs to it — re-init from auto-seek, a new
+    // SourceBuffer, etc. Never guess from init bytes; just reuse the current
+    // track. Only a recognized song click (openSession) clears activeTrackId.
+    var active = activeTrackId ? tracks[activeTrackId] : null;
+    var activeFresh = active && (active.status === 'Capturing' ||
+        (Date.now() - (active.endedAt || active.startedAt) < ACTIVE_GRACE_MS));
+    if (isInit && activeFresh) {
+      active._seekDone = true;
+      sbToSession.set(sb, active.id);
+      if (timing) { active.duration = timing.duration; active.timescale = timing.timescale; }
+      if (active.status !== 'Capturing' && active.status !== 'Incomplete') {
+        active.status = 'Capturing'; // reopen if quiet timer had finished it
+        active.endedAt = 0;
+      }
+      armQuietTimer(active);
       postUpdate();
       return;
     }
 
-    // Fallback: content-based same-song match (covers cases where no click was
-    // captured, e.g. autoplay / keyboard). Reuse instead of duplicating.
-    if (isInit) {
-      var same = findTrackForInit(sig, timing);
-      if (same) {
-        same._seekDone = true;
-        sbToSession.set(sb, same.id);
-        if (timing) { same.duration = timing.duration; same.timescale = timing.timescale; }
-        armQuietTimer(same);
-        postUpdate();
-        return;
-      }
-    }
-
-    // No session track and no content match => a genuinely new song. Create it
-    // and make it this session's track.
+    // No current song (or it was explicitly switched away) => new song.
     if (tr && isInit && tr.sawMedia) {
       finalizeTrack(tr);
       sbToSession.delete(sb);
@@ -441,7 +435,7 @@
       tr = newSession();
       if (!tr) return;
       sbToSession.set(sb, tr.id);
-      if (isInit && !sessionTrackId) sessionTrackId = tr.id;
+      if (isInit) activeTrackId = tr.id;
     }
     if (tr.status !== 'Capturing') return;
     if (tr.bytes + buf.byteLength > MAX_BYTES) {
@@ -686,8 +680,7 @@
       sbToSession = new WeakMap();
       lastSeekSig = '';
       lastSeekAt = 0;
-      sessionTrackId = null;
-      sessionStart = 0;
+      activeTrackId = null;
       postUpdate();
     } else if (d.type === 'remove-track') {
       var id = d.id;
