@@ -43,14 +43,8 @@
       window.postMessage({ source: 'mimi-bridge', type: 'save-all', names: msg.names || {} }, '*');
     }
   });
-  // "Fast capture" preference (set in the popup) -> page.
-  function pushAutoSeek(v) {
-    window.postMessage({ source: 'mimi-bridge', type: 'set-auto-seek', value: !!v }, '*');
-  }
-  try {
-    chrome.storage.local.get(['autoSeek'], function (r) { pushAutoSeek(!(r && r.autoSeek === false)); }); // default ON
-    chrome.storage.onChanged.addListener(function (ch, area) {
-      if (area === 'local' && ch.autoSeek) pushAutoSeek(ch.autoSeek.newValue !== false);
-    });
-  } catch (e) { /* ignore */ }
+  // Fast capture is an internal strategy now (no popup control): the passive
+  // network layer is tried first, and the seek fallback only fires when that
+  // layer cannot deliver. Always enabled.
+  window.postMessage({ source: 'mimi-bridge', type: 'set-auto-seek', value: true }, '*');
 })();

@@ -225,6 +225,7 @@
         tr.title = t;
         tr.named = true;
         lastPlayTitle = ''; lastPlayAt = 0; // consumed
+        adoptMoonlitByTitle(tr);
         postUpdate();
         return;
       }
@@ -298,6 +299,7 @@
         if (t && tr.title !== t) {
           tr.title = t;
           tr.named = true;
+          if (tr.source === 'mse') adoptMoonlitByTitle(tr);
           postUpdate();
         }
       }, ms);
@@ -579,6 +581,10 @@
               break;
             }
           }
+        } else if (lastDecryptClip && Date.now() - lastDecryptClip.at < 8000) {
+          // The player decrypted this clip before appending any MSE data
+          // (no track existed to link to): claim the pending clip now.
+          tr.linkedClip = lastDecryptClip.id;
         }
         activeTrackId = tr.id;
         scheduleMediaTitle(tr);
@@ -743,6 +749,7 @@
   var origFetch = null, origDecrypt = null, decryptDesc = null;
   var playbackKeys = new Map(); // ciphertext-head fingerprint -> {key, counter, length}
   var ciphers = new Map();      // clip id -> {data, ext, state}
+  var lastDecryptClip = null;   // {id, at}: a decrypt fired while no MSE track existed yet
 
   function u8view(v) {
     return ArrayBuffer.isView(v)
@@ -769,7 +776,7 @@
   // falling back to mvhd duration + timescale. Duration alone is NOT enough:
   // Suno's streaming init segment often carries an unknown (0xFFFFFFFF)
   // duration, which is why the old duration-only check let duplicates live.
-  function moonlitReady(clipId, pt, ext) {
+  function moonlitReady(clipId, pt, ext, fetchedAt) {
     if (!captureOn) return;
     var fmt = sniffFormat(pt);
     if (!fmt) return;
@@ -809,7 +816,8 @@
       var t = tracks[order[j]];
       if (!t || t === m || t.source !== 'mse') continue;
       var sameSong = (t.linkedClip === clipId) ||
-        (m.duration && t.duration && m.timescale === t.timescale && m.duration === t.duration);
+        (m.duration && t.duration && m.timescale === t.timescale && m.duration === t.duration) ||
+        (m.named && t.named && t.title && t.title === m.title);
       if (sameSong) {
         if (!m.named && t.named && t.title) { m.title = t.title; m.named = true; }
         if (t.initSig && tombstoneInits.indexOf(t.initSig) < 0) tombstoneInits.push(t.initSig);
@@ -818,6 +826,25 @@
         delete tracks[t.id];
         order = order.filter(function (x) { return x !== t.id; });
       }
+    }
+    // Last resort for the race where the clip download started at play time
+    // and finishes AFTER the MSE track was created, with the decrypt-side
+    // link never set (no track existed at decrypt time): the clip being
+    // decrypted IS the song playing now, so if the current MSE track began
+    // right around this cipher's fetch, it is the same song. Guarded by the
+    // fetch timestamp so a late-arriving OLD song's clip can never swallow
+    // the NEW song's MSE track.
+    var at2 = activeTrackId ? tracks[activeTrackId] : null;
+    if (at2 && at2.source === 'mse' && at2.status === 'Capturing' &&
+        typeof fetchedAt === 'number' &&
+        Math.abs(at2.startedAt - fetchedAt) < 8000) {
+      if (!m.named && at2.named && at2.title) { m.title = at2.title; m.named = true; }
+      if (at2.initSig && tombstoneInits.indexOf(at2.initSig) < 0) tombstoneInits.push(at2.initSig);
+      if (tombstoneInits.length > 32) tombstoneInits.shift();
+      clearTimer(at2);
+      delete tracks[at2.id];
+      order = order.filter(function (x) { return x !== at2.id; });
+      if (activeTrackId === at2.id) activeTrackId = m.id;
     }
     postUpdate();
   }
@@ -837,7 +864,7 @@
   // capturing: drop the MSE copy (transfer its name if it had one).
   function adoptMoonlitMatch(tr) {
     var m = moonlitHasMatch(tr);
-    if (!m) return;
+    if (!m) return false;
     if (!m.named && tr.named && tr.title) { m.title = tr.title; m.named = true; }
     if (tr.initSig && tombstoneInits.indexOf(tr.initSig) < 0) tombstoneInits.push(tr.initSig);
     if (tombstoneInits.length > 32) tombstoneInits.shift();
@@ -846,6 +873,31 @@
     order = order.filter(function (x) { return x !== tr.id; });
     if (activeTrackId === tr.id) activeTrackId = m.id;
     postUpdate();
+    return true;
+  }
+
+  // Final safety net: an MSE track that ended up with the exact title of an
+  // already-held moonlit copy is a duplicate (its init carried no usable
+  // duration and no link survived the switch race). Keep the complete copy.
+  function adoptMoonlitByTitle(tr) {
+    if (!tr || tr.source !== 'mse' || !tr.named || !tr.title) return false;
+    for (var i = 0; i < order.length; i++) {
+      var t = tracks[order[i]];
+      if (t && t.source === 'moonlit' && t.named && t.title === tr.title) {
+        if (t.initSig || tr.initSig) {
+          var s = tr.initSig || t.initSig;
+          if (tombstoneInits.indexOf(s) < 0) tombstoneInits.push(s);
+          if (tombstoneInits.length > 32) tombstoneInits.shift();
+        }
+        clearTimer(tr);
+        delete tracks[tr.id];
+        order = order.filter(function (x) { return x !== tr.id; });
+        if (activeTrackId === tr.id) activeTrackId = t.id;
+        postUpdate();
+        return true;
+      }
+    }
+    return false;
   }
 
   function tryMoonlitDecrypt(id) {
@@ -857,7 +909,7 @@
     origDecrypt.call(subtle, { name: 'AES-CTR', counter: pk.counter, length: pk.length }, pk.key, c.data)
       .then(function (pt) {
         ciphers.delete(id);
-        moonlitReady(id, new Uint8Array(pt), c.ext);
+        moonlitReady(id, new Uint8Array(pt), c.ext, c.fetchedAt);
       })
       .catch(function () { c.state = 'waiting for key'; });
   }
@@ -899,7 +951,7 @@
         if (zeros) return; // zero-filled tail = truncated response, useless
       }
       ciphers.set(id, { data: out, ext: match[2].toLowerCase(), state: 'waiting for key',
-                        clipId: id, linkedTrackId: null });
+                        clipId: id, linkedTrackId: null, fetchedAt: Date.now() });
       if (ciphers.size > MAX_CIPHERS) {
         var oldest = ciphers.keys().next().value;
         if (oldest !== id) ciphers.delete(oldest);
@@ -953,14 +1005,25 @@
               // The player is decrypting a clip we captured: LINK the current
               // MSE track to that clip. This is the reliable song identity —
               // mvhd duration in streaming init segments is often unknown.
+              var matched = null;
               ciphers.forEach(function (c) {
                 if (c.linkedTrackId || headFp(c.data) !== sig) return;
+                matched = c;
                 var at = activeTrackId ? tracks[activeTrackId] : null;
-                if (at && at.source === 'mse' && at.status === 'Capturing') {
+                if (at && at.source === 'mse' &&
+                    (at.status === 'Capturing' || Date.now() - at.startedAt < 8000)) {
                   c.linkedTrackId = at.id;
                   at.linkedClip = c.clipId;
+                  matched = null;
                 }
               });
+              // Decrypt fired while no MSE track existed (the click's
+              // openSession cleared the active one, and the player decrypts
+              // before its first append): remember the clip so the MSE track
+              // appearing seconds later can still be linked to it. Without
+              // this, moonlitReady lands with no link and no duration to
+              // match — exactly the duplicate-track window.
+              if (matched) lastDecryptClip = { id: matched.clipId, at: Date.now() };
               var ids = [];
               ciphers.forEach(function (c, cid) { if (c.state === 'waiting for key') ids.push(cid); });
               for (var q = 0; q < ids.length; q++) tryMoonlitDecrypt(ids[q]);
@@ -984,7 +1047,7 @@
   // exactly what a user does by dragging the slider to the end. We replicate
   // that by setting the media element's currentTime. This uses only the
   // player's own buffering path; no network/API/decrypt/download changes.
-  var autoSeek = true;            // ON by default: jump ahead so the player buffers the whole song. Popup checkbox "Fast capture" can turn it off.
+  var autoSeek = true;            // internal strategy: passive network layer first, seek fallback when it cannot deliver
   var seekAttempts = 0;
   var seekTrack = null;           // track we are trying to preload
   var SEEK_MAX_TRIES = 16;        // retry while duration is still unknown
@@ -1094,7 +1157,8 @@
       // give the network layer more time before touching the player.
       var pending = false;
       ciphers.forEach(function (c) {
-        if (c.linkedTrackId === tr.id && (c.state === 'waiting for key' || c.state === 'decrypting')) pending = true;
+        if ((c.linkedTrackId === tr.id || (tr.linkedClip && c.clipId === tr.linkedClip)) &&
+            (c.state === 'waiting for key' || c.state === 'decrypting')) pending = true;
       });
       if (pending && (tr._gateRetries || 0) < 2) {
         tr._gateRetries = (tr._gateRetries || 0) + 1;
@@ -1102,6 +1166,7 @@
         setTimeout(function () { decide(); }, 5000);
         return;
       }
+      if (tr.named && adoptMoonlitByTitle(tr)) return;
       if (!autoSeek) { armQuietTimer(tr); return; }
       // Fallback: nudge the player to buffer the whole song.
       var key = tr.initSig || (tr.duration + ':' + tr.timescale) || '';
