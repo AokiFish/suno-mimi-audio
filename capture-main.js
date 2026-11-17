@@ -37,6 +37,7 @@
   var tracks = {}; // id -> {id, title, chunks, bytes, status, source, startedAt, timer}
   var order = [];
   var sbToSession = new WeakMap(); // SourceBuffer -> session id
+  var DUP_SINK = '__dup__'; // SourceBuffer replaying an already-held song: ignore its media
   var msToSbs = new WeakMap(); // MediaSource -> [SourceBuffer]
 
   function shortId() {
@@ -117,7 +118,7 @@
   var UI_WORDS = /^(play|pause|share|download|more|copy|like|save|close|remove|remix|extend|upload|create|sign in|subscribe)$/i;
   var lastPlayTitle = '';
   var lastPlayAt = 0;
-  var TITLE_MAX_AGE = 300000; // remember the clicked name for 5 min
+  var TITLE_MAX_AGE = 60000; // a clicked name is only valid for the song that starts within 60 s
   var TITLE_ATTACH_MS = 5000; // a name arriving this soon after a track may fill it
 
   // The player plays ONE song at a time. All appended data belongs to the
@@ -256,8 +257,14 @@
     // A click on something with text inside the song list is a song selection.
     // Open a new session even if we failed to read the exact name — switching
     // songs must never depend on title extraction succeeding.
-    if (txt && txt.length >= 2) openSession();
-    if (found) setSongTitle(found);
+    // Song identity comes from the audio data (see recordAppend), not from
+    // clicks. A click only supplies the NAME for a new song. Clicks that show
+    // no recognizable song, or a song we already hold, are ignored: they must
+    // neither split the current capture nor leave a stale name behind for the
+    // next song.
+    if (!found) return;
+    openSession();
+    setSongTitle(found);
   }, true);
 
   // NOTE: the earlier fetch/XHR title scrape was removed. It grabbed the first
@@ -268,6 +275,33 @@
   // the specific song the user chose, so it is the only title source now.
   // A diagnostic (window.__mimiCapture.probeTitle) is provided below to capture
   // real data if clicking still fails.
+
+  // The player usually publishes the playing song to the Media Session API
+  // (lock-screen / media-key metadata). It names the song that is actually
+  // playing, unlike a click, which can resolve to the wrong card.
+  function mediaTitle() {
+    try {
+      var md = navigator.mediaSession && navigator.mediaSession.metadata;
+      var t = md && typeof md.title === 'string' ? md.title.trim() : '';
+      return goodTitle(t) ? t : '';
+    } catch (e) { return ''; }
+  }
+  // The metadata can lag a moment behind the first segment: sample a few
+  // times, and only while this track is still the current one (so a quick
+  // switch can never rename it with the next song's title).
+  function scheduleMediaTitle(tr) {
+    [1200, 3500, 7000].forEach(function (ms) {
+      setTimeout(function () {
+        if (tracks[tr.id] !== tr || activeTrackId !== tr.id) return;
+        var t = mediaTitle();
+        if (t && tr.title !== t) {
+          tr.title = t;
+          tr.named = true;
+          postUpdate();
+        }
+      }, ms);
+    });
+  }
 
   function titleFromPage() {
     if (lastPlayTitle && Date.now() - lastPlayAt < TITLE_MAX_AGE) return lastPlayTitle;
@@ -370,7 +404,9 @@
     try {
       var d = new Uint8Array(buf);
       var h = 2166136261;
-      var step = Math.max(1, Math.floor(d.length / 256)); // sample up to 256 bytes
+      // Hash EVERY byte: sampling skipped the few bytes (duration) that differ
+      // between songs, making different songs look identical.
+      var step = 1;
       for (var i = 0; i < d.length; i += step) {
         h ^= d[i];
         h = (h * 16777619) >>> 0;
@@ -405,6 +441,11 @@
     var id = sbToSession.get(sb);
     var tr = id ? tracks[id] : null;
 
+    // This SourceBuffer is replaying a song we already hold: drop its media
+    // segments so no duplicate track (same name) is created. A new init
+    // segment is still evaluated below.
+    if (id === DUP_SINK && !isInit) return;
+
     // The player plays ONE song at a time. While a current track exists and is
     // still fresh, EVERY init belongs to it — re-init from auto-seek, a new
     // SourceBuffer, etc. Never guess from init bytes; just reuse the current
@@ -412,7 +453,10 @@
     var active = activeTrackId ? tracks[activeTrackId] : null;
     var activeFresh = active && (active.status === 'Capturing' ||
         (Date.now() - (active.endedAt || active.startedAt) < ACTIVE_GRACE_MS));
-    if (isInit && activeFresh) {
+    // Same song as the active track unless both durations are known and differ.
+    var sameAsActive = !!(active && isInit && (!timing || !active.duration ||
+        (timing.duration === active.duration && timing.timescale === active.timescale)));
+    if (isInit && activeFresh && sameAsActive) {
       active._seekDone = true;
       sbToSession.set(sb, active.id);
       if (timing) { active.duration = timing.duration; active.timescale = timing.timescale; }
@@ -425,6 +469,34 @@
       return;
     }
 
+    // A song we already hold (same full init bytes, or the same exact
+    // duration): never capture it twice. Still capturing -> keep appending to
+    // that track; already finished -> ignore this replay. To capture a song
+    // again, remove its track with the x button first.
+    if (isInit) {
+      var same = null;
+      for (var si = 0; si < order.length; si++) {
+        var st = tracks[order[si]];
+        if (!st) continue;
+        if ((sig && st.initSig && sig === st.initSig) ||
+            (timing && st.duration && st.timescale &&
+             timing.duration === st.duration && timing.timescale === st.timescale)) { same = st; break; }
+      }
+      if (same) {
+        if (same.status === 'Capturing') {
+          sbToSession.set(sb, same.id);
+          activeTrackId = same.id;
+          armQuietTimer(same);
+          postUpdate();
+        } else {
+          sbToSession.set(sb, DUP_SINK);
+        }
+        return;
+      }
+      // A different song starts: close the previous one.
+      if (active && active.status === 'Capturing') finalizeTrack(active);
+    }
+
     // No current song (or it was explicitly switched away) => new song.
     if (tr && isInit && tr.sawMedia) {
       finalizeTrack(tr);
@@ -435,7 +507,7 @@
       tr = newSession();
       if (!tr) return;
       sbToSession.set(sb, tr.id);
-      if (isInit) activeTrackId = tr.id;
+      if (isInit) { activeTrackId = tr.id; scheduleMediaTitle(tr); }
     }
     if (tr.status !== 'Capturing') return;
     if (tr.bytes + buf.byteLength > MAX_BYTES) {
