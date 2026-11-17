@@ -62,6 +62,7 @@ function render(state) {
     var input = document.createElement('input');
     input.type = 'text';
     input.value = tr.title || 'Suno track';
+    input.setAttribute('data-track-id', tr.id);
     var save = document.createElement('button');
     save.className = 'primary';
     save.textContent = 'Save audio ↓';
@@ -123,7 +124,13 @@ document.getElementById('clear-all').addEventListener('click', function () {
 });
 
 document.getElementById('download-all').addEventListener('click', function () {
-  sendToSunoTab({ type: 'save-all' });
+  // Send the names currently shown in the inputs so the zip uses them.
+  var names = {};
+  Array.prototype.forEach.call(document.querySelectorAll('input[data-track-id]'), function (el) {
+    var v = el.value.trim();
+    if (v) names[el.getAttribute('data-track-id')] = v;
+  });
+  sendToSunoTab({ type: 'save-all', names: names });
 });
 
 chrome.runtime.onMessage.addListener(function (msg) {

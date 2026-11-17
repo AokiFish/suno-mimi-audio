@@ -40,7 +40,7 @@
       // origin and reports save-done / save-failed back through tracks-update.
       window.postMessage({ source: 'mimi-bridge', type: 'save-track', id: msg.id, filename: msg.filename || '' }, '*');
     } else if (msg.type === 'save-all') {
-      window.postMessage({ source: 'mimi-bridge', type: 'save-all' }, '*');
+      window.postMessage({ source: 'mimi-bridge', type: 'save-all', names: msg.names || {} }, '*');
     }
   });
 })();

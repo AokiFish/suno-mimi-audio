@@ -454,8 +454,13 @@
     var activeFresh = active && (active.status === 'Capturing' ||
         (Date.now() - (active.endedAt || active.startedAt) < ACTIVE_GRACE_MS));
     // Same song as the active track unless both durations are known and differ.
-    var sameAsActive = !!(active && isInit && (!timing || !active.duration ||
-        (timing.duration === active.duration && timing.timescale === active.timescale)));
+    // Different init bytes mean a different song (a same-song re-init appends
+    // identical bytes), so a song switched to while the previous one is still
+    // loading is never merged into the old track.
+    var sameAsActive = !!(active && isInit && (
+        (sig && active.initSig && sig === active.initSig) ||
+        (timing && active.duration && active.timescale &&
+         timing.duration === active.duration && timing.timescale === active.timescale)));
     if (isInit && activeFresh && sameAsActive) {
       active._seekDone = true;
       sbToSession.set(sb, active.id);
@@ -522,6 +527,13 @@
       if (timing) { tr.duration = timing.duration; tr.timescale = timing.timescale; }
     } else {
       var mt = parseMediaTime(buf);
+      // A seek (ours or the player's) can make the player append a segment it
+      // already appended; keeping both would repeat that audio in the file.
+      if (mt >= 0) {
+        tr._seen = tr._seen || {};
+        if (tr._seen[mt]) { armQuietTimer(tr); return; }
+        tr._seen[mt] = 1;
+      }
       if (mt > tr.maxMediaTime) tr.maxMediaTime = mt;
       if (mt >= 0) tr.sawMedia = true;
     }
@@ -530,6 +542,7 @@
     tr.bytes += buf.byteLength;
     onFirstMediaSegment(tr);
     armQuietTimer(tr);
+    if (preSeek && tr === seekTrack) armRestore(900); // buffering done ~0.9 s after the last segment
     postUpdate();
   }
 
@@ -664,8 +677,33 @@
     return 0;
   }
 
+  // The preload seek jumps the playhead to the end of the song. Remember where
+  // the listener was and put them back there once the buffering has finished,
+  // otherwise the song "ends" a moment later and Suno restarts it.
+  var preSeek = null, restoreTimer = null;
+  function armRestore(ms) {
+    if (!preSeek) return;
+    if (restoreTimer) clearTimeout(restoreTimer);
+    restoreTimer = setTimeout(restorePlayback, ms);
+  }
+  function restorePlayback() {
+    var ps = preSeek;
+    preSeek = null; restoreTimer = null;
+    if (!ps) return;
+    // The user switched songs meanwhile: the media element now belongs to the
+    // new song, leave it alone.
+    if (!seekTrack || activeTrackId !== seekTrack.id) return;
+    var el = ps.el;
+    if ((el.currentSrc || el.src || '') !== ps.src) return;
+    try { el.currentTime = ps.time; } catch (e) { /* ignore */ }
+    if (ps.wasPlaying) {
+      try { var pr = el.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) { /* ignore */ }
+    }
+  }
+
   function seekToEnd() {
     if (!autoSeek || !captureOn || seekAttempts >= SEEK_MAX_TRIES) return;
+    if (seekTrack && activeTrackId !== seekTrack.id) return; // song was switched
     var el = findPlayerMedia();
     if (!el) { scheduleSeekRetry(); return; }
     var d = seekDuration(el);
@@ -674,8 +712,15 @@
     // Don't re-seek if already at/near the target (avoids loops).
     if (Math.abs((el.currentTime || 0) - target) < 0.5) return;
     try {
+      if (!preSeek) {
+        preSeek = { el: el, time: el.currentTime || 0, wasPlaying: !el.paused,
+                    src: el.currentSrc || el.src || '' };
+      }
+      // Pause so the song cannot reach its end (and restart) while buffering.
+      try { el.pause(); } catch (e2) { /* ignore */ }
       el.currentTime = target;
       seekAttempts++;
+      armRestore(6000); // fallback if no further segments arrive
     } catch (e) { scheduleSeekRetry(); }
   }
 
@@ -707,10 +752,126 @@
     clearTimer(tr);
     setTimeout(function () {
       tr._warming = false;
+      // The user already switched songs: never touch the player now (the
+      // media element belongs to the NEW song). Keep what was captured, but
+      // do not offer a truncated file as a finished one.
+      if (activeTrackId !== tr.id) {
+        var cov = coverage(tr);
+        if (tr.status === 'Capturing' && cov >= 0 && cov < 0.9) {
+          tr.status = 'Incomplete';
+          clearTimer(tr);
+          postUpdate();
+        } else if (tr.status === 'Capturing') {
+          armQuietTimer(tr);
+        }
+        return;
+      }
       seekToEnd();
       // If the seek never produced new appends, let the quiet timer finish it.
       if (tr.status === 'Capturing') armQuietTimer(tr);
     }, SEEK_WARMUP_MS);
+  }
+
+  // Our own download blobs must NOT go through the createObjectURL hook:
+  // that hook treats any audio/* blob as the player's audio and would add a
+  // new "Suno track" entry for every file we save.
+  function rawObjectURL(b) {
+    var fn = (typeof origCreateObjectURL === 'function') ? origCreateObjectURL : URL.createObjectURL;
+    return fn.call(URL, b);
+  }
+
+  // --- Minimal store-only ZIP writer (no libraries) for "Download all" ---
+  var CRC_TABLE = null;
+  function crc32(u8) {
+    if (!CRC_TABLE) {
+      CRC_TABLE = new Uint32Array(256);
+      for (var n = 0; n < 256; n++) {
+        var c0 = n;
+        for (var k = 0; k < 8; k++) c0 = (c0 & 1) ? (0xEDB88320 ^ (c0 >>> 1)) : (c0 >>> 1);
+        CRC_TABLE[n] = c0 >>> 0;
+      }
+    }
+    var c = 0xFFFFFFFF;
+    for (var i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  function trackBytes(tr) {
+    return Promise.all(tr.chunks.map(function (ch) {
+      return (ch instanceof Blob) ? ch.arrayBuffer() : Promise.resolve(ch);
+    })).then(function (bufs) {
+      var total = 0, o = 0;
+      bufs.forEach(function (b) { total += b.byteLength; });
+      var out = new Uint8Array(total);
+      bufs.forEach(function (b) { out.set(new Uint8Array(b), o); o += b.byteLength; });
+      return out;
+    });
+  }
+  function zipBlob(entries) {
+    var enc = new TextEncoder(), parts = [], central = [], offset = 0;
+    var d = new Date();
+    var dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    var dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    entries.forEach(function (e) {
+      var name = enc.encode(e.name), crc = crc32(e.data), size = e.data.length;
+      var lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+      lh.setUint16(8, 0, true); lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true);
+      lh.setUint32(14, crc, true); lh.setUint32(18, size, true); lh.setUint32(22, size, true);
+      lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+      parts.push(lh.buffer, name, e.data);
+      var ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true);
+      ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true); ch.setUint16(12, dosTime, true);
+      ch.setUint16(14, dosDate, true); ch.setUint32(16, crc, true); ch.setUint32(20, size, true);
+      ch.setUint32(24, size, true); ch.setUint16(28, name.length, true);
+      ch.setUint32(42, offset, true);
+      central.push(ch.buffer, name);
+      offset += 30 + name.length + size;
+    });
+    var cdSize = 0;
+    central.forEach(function (p) { cdSize += p.byteLength; });
+    var eocd = new DataView(new ArrayBuffer(22));
+    eocd.setUint32(0, 0x06054b50, true);
+    eocd.setUint16(8, entries.length, true); eocd.setUint16(10, entries.length, true);
+    eocd.setUint32(12, cdSize, true); eocd.setUint32(16, offset, true);
+    return new Blob(parts.concat(central, [eocd.buffer]), { type: 'application/zip' });
+  }
+  function safeName(s) {
+    return String(s || 'Suno track').replace(/[\\/:*?"<>|]/g, '-').trim() || 'Suno track';
+  }
+  // One click: every "Ready to save" track goes into a single .zip.
+  function saveAllZip(names) {
+    var ready = order.filter(function (id) {
+      return tracks[id] && tracks[id].status === 'Ready to save';
+    });
+    if (!ready.length) return;
+    if (ready.length === 1) { downloadTrack(ready[0], names[ready[0]] || tracks[ready[0]].title); return; }
+    var used = {};
+    Promise.all(ready.map(function (id) { return trackBytes(tracks[id]); })).then(function (datas) {
+      var entries = ready.map(function (id, i) {
+        var base = safeName(names[id] || tracks[id].title), name = base + '.m4a', n = 2;
+        while (used[name.toLowerCase()]) name = base + ' (' + (n++) + ').m4a';
+        used[name.toLowerCase()] = 1;
+        return { name: name, data: datas[i] };
+      });
+      var url = rawObjectURL(zipBlob(entries));
+      var a = document.createElement('a');
+      var t = new Date(), p2 = function (x) { return (x < 10 ? '0' : '') + x; };
+      a.href = url;
+      a.download = 'suno-mimi-' + t.getFullYear() + p2(t.getMonth() + 1) + p2(t.getDate()) +
+        '-' + p2(t.getHours()) + p2(t.getMinutes()) + p2(t.getSeconds()) + '.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+      ready.forEach(function (id) {
+        window.postMessage({ source: 'mimi-capture-main', type: 'save-done', id: id }, '*');
+      });
+    }).catch(function () {
+      ready.forEach(function (id) {
+        window.postMessage({ source: 'mimi-capture-main', type: 'save-failed', id: id, reason: 'error' }, '*');
+      });
+    });
   }
 
   // Download one track in page origin: build blob URL here (MAIN world), click
@@ -723,7 +884,7 @@
     }
     try {
       var blob = new Blob(tr.chunks, { type: 'audio/mp4' });
-      var url = URL.createObjectURL(blob);
+      var url = rawObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
       a.download = (filename || tr.title || 'Suno track').replace(/[\\/:*?"<>|]/g, '-') + '.m4a';
@@ -767,15 +928,8 @@
     } else if (d.type === 'save-track') {
       downloadTrack(d.id, d.filename);
     } else if (d.type === 'save-all') {
-      // Queue all ready tracks with a gap between each. Chrome can block or
-      // prompt on a burst of synchronous programmatic downloads; spacing them
-      // out and using a real user gesture from the popup avoids that.
-      var ready = order.filter(function (id) {
-        return tracks[id] && tracks[id].status === 'Ready to save';
-      });
-      ready.forEach(function (id, i) {
-        setTimeout(function () { downloadTrack(id, tracks[id] ? tracks[id].title : ''); }, i * 700);
-      });
+      // One zip with every ready track (names come from the popup inputs).
+      saveAllZip(d.names || {});
     }
   });
 
