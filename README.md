@@ -79,8 +79,6 @@ cannot install into your browser for you.
 This open source project is free, and if the project helps you, you can buy me a cup of coffee. Your support is the motivation for continuous maintenance.
 
 <p align="center">
-  <img src="assets/donate-wechat.png" alt="微信支付" width="220">
-  &nbsp;&nbsp;
   <img src="assets/donate-usdt-bsc.jpg" alt="USDT · BSC (BEP20)" width="220">
   &nbsp;&nbsp;
   <img src="assets/donate-usdc-bsc.jpg" alt="USDC · BSC (BEP20)" width="220">
