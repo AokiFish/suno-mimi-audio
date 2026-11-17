@@ -63,9 +63,9 @@ cannot install into your browser for you.
   analytics, no token/cookie/key reads. It does not call Suno's download menu
   or download endpoint.
 
-## 开源免费 · 请作者喝杯咖啡
+## Open source free · Invite author for a cup of coffee
 
-本项目开源免费，如果项目帮到了你，可以请我喝一杯咖啡，你的支持是持续维护的动力。
+This open source project is free, and if the project helps you, you can buy me a cup of coffee. Your support is the motivation for continuous maintenance.
 
 <p align="center">
   <img src="assets/donate-wechat.png" alt="微信支付" width="220">
@@ -73,8 +73,6 @@ cannot install into your browser for you.
   <img src="assets/donate-usdt-bsc.jpg" alt="USDT · BSC (BEP20)" width="220">
   &nbsp;&nbsp;
   <img src="assets/donate-usdc-bsc.jpg" alt="USDC · BSC (BEP20)" width="220">
-  &nbsp;&nbsp;
-  <img src="assets/donate-usdc-sol.jpg" alt="USDC · Solana" width="220">
 </p>
 
 ## Files
