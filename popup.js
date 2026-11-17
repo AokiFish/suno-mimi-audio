@@ -136,10 +136,7 @@ document.getElementById('download-all').addEventListener('click', function () {
 chrome.runtime.onMessage.addListener(function (msg) {
   if (!msg) return;
   if (msg.type === 'tracks-update') refresh();
-  if (msg.type === 'save-done' && msg.id) {
-    chrome.runtime.sendMessage({ type: 'consume-save' }, function () { refresh(); });
-  }
-  if (msg.type === 'save-failed') refresh();
+  if (msg.type === 'save-done' || msg.type === 'save-failed') refresh();
 });
 
 refresh();

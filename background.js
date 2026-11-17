@@ -1,33 +1,8 @@
 // background.js — service worker.
-// Freemium: free 5 saves/day, subscription for unlimited, owner unlimited.
-// Daily reset in Asia/Shanghai. No license server is wired: validateLicense
-// accepts only owner keys matching /^MIMI-OWNER-/; every other key is invalid
-// until a real provider (Stripe / LemonSqueezy / ExtensionPay) is connected.
-// TODO: wire a real subscription provider here; do not invent an endpoint.
+// Open-source, fully free: no daily limit, no license key, no subscription.
+// Keeps the capture on/off preference and re-injects content scripts into
+// Suno tabs that were open before an extension (re)load.
 'use strict';
-
-var FREE_DAILY_LIMIT = 5;
-var OWNER_KEY_RE = /^MIMI-OWNER-/;
-
-function shanghaiDateKey(d) {
-  var parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
-  }).formatToParts(d || new Date());
-  var y = '', m = '', day = '';
-  parts.forEach(function (p) {
-    if (p.type === 'year') y = p.value;
-    if (p.type === 'month') m = p.value;
-    if (p.type === 'day') day = p.value;
-  });
-  return y + '-' + m + '-' + day;
-}
-
-function validateLicense(key) {
-  if (typeof key === 'string' && OWNER_KEY_RE.test(key.trim())) {
-    return { ok: true, kind: 'owner' };
-  }
-  return { ok: false, kind: 'none' };
-}
 
 // Static content_scripts only inject on page load. After an extension reload,
 // Suno tabs that are already open keep the OLD (now removed) scripts and get no
@@ -92,43 +67,18 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     // Read tracks back from storage: the MV3 service worker can be torn down
     // between capture (song playing) and popup open, resetting latestTracks
     // to []. storage.local survives that; the in-memory copy does not.
-    chrome.storage.local.get(['captureOn', 'licenseKey', 'dailyCount', 'dailyDate', 'latestTracks'], function (r) {
-      var today = shanghaiDateKey(new Date());
-      var count = (r.dailyDate === today) ? (r.dailyCount || 0) : 0;
-      var lic = validateLicense(r.licenseKey || '');
+    chrome.storage.local.get(['captureOn', 'latestTracks'], function (r) {
       var tracks = (r.latestTracks && r.latestTracks.length) ? r.latestTracks : latestTracks;
       latestTracks = tracks;
-      sendResponse({
-        captureOn: r.captureOn !== false,
-        tracks: tracks,
-        todayUsed: count,
-        dailyLimit: FREE_DAILY_LIMIT,
-        licensed: lic.ok,
-        licenseKind: lic.kind
-      });
+      sendResponse({ captureOn: r.captureOn !== false, tracks: tracks });
     });
     return true; // async sendResponse
   } else if (msg.type === 'set-capture-on') {
     chrome.storage.local.set({ captureOn: !!msg.value });
-    chrome.tabs.query({ url: ['*://suno.com/*', '*://www.suno.com/*'] }, function (tabs) {
+    chrome.tabs.query({ url: SUNO_MATCHES }, function (tabs) {
       (tabs || []).forEach(function (t) {
         chrome.tabs.sendMessage(t.id, { type: 'set-capture-on', value: !!msg.value }).catch(function () {});
       });
     });
-  } else if (msg.type === 'set-license-key') {
-    chrome.storage.local.set({ licenseKey: (msg.key || '').trim() });
-  } else if (msg.type === 'consume-save') {
-    // Called by the popup AFTER a save completes. Owner/licensed: no count.
-    chrome.storage.local.get(['licenseKey', 'dailyCount', 'dailyDate'], function (r) {
-      var lic = validateLicense(r.licenseKey || '');
-      if (lic.ok) { sendResponse({ allowed: true, counted: false }); return; }
-      var today = shanghaiDateKey(new Date());
-      var count = (r.dailyDate === today) ? (r.dailyCount || 0) : 0;
-      if (count >= FREE_DAILY_LIMIT) { sendResponse({ allowed: false, counted: false, todayUsed: count }); return; }
-      chrome.storage.local.set({ dailyCount: count + 1, dailyDate: today }, function () {
-        sendResponse({ allowed: true, counted: true, todayUsed: count + 1 });
-      });
-    });
-    return true;
   }
 });

@@ -9,7 +9,7 @@ was never available to read.
 A Chrome extension is a folder of files, not a website and not a space. This
 folder is the whole plugin: `manifest.json` declares what it is and what it may
 touch; `capture-main.js` runs inside the Suno page; `bridge.js` relays messages;
-`background.js` keeps the daily count and the license check; `popup.html` +
+`background.js` keeps the capture on/off state; `popup.html` +
 `popup.js` are the toolbar panel you click. Chrome loads the folder as-is. That
 is why it has to be installed locally on your Windows Chrome — a cloud computer
 cannot install into your browser for you.
@@ -63,12 +63,19 @@ cannot install into your browser for you.
   analytics, no token/cookie/key reads. It does not call Suno's download menu
   or download endpoint.
 
-## Freemium
+## 开源免费 · 请作者喝杯咖啡
 
-- Free: 5 saves per day (resets daily, Asia/Shanghai).
-- Subscription: unlimited (provider not wired yet — see TODO in
-  `background.js`; the Upgrade link is a placeholder, `https://example.com/subscribe`).
-- Owner: keys starting with `MIMI-OWNER-` are unlimited (stub only, no server).
+本项目开源免费，如果项目帮到了你，可以请我喝一杯咖啡，你的支持是持续维护的动力。
+
+<p align="center">
+  <img src="assets/donate-wechat.png" alt="微信支付" width="220">
+  &nbsp;&nbsp;
+  <img src="assets/donate-usdt-bsc.jpg" alt="USDT · BSC (BEP20)" width="220">
+  &nbsp;&nbsp;
+  <img src="assets/donate-usdc-bsc.jpg" alt="USDC · BSC (BEP20)" width="220">
+  &nbsp;&nbsp;
+  <img src="assets/donate-usdc-sol.jpg" alt="USDC · Solana" width="220">
+</p>
 
 ## Files
 
@@ -77,7 +84,7 @@ cannot install into your browser for you.
 | `manifest.json` | MV3 declaration, permissions `["storage", "scripting"]`, Suno hosts |
 | `capture-main.js` | MAIN world, dual-layer capture: `fetch` + `crypto.subtle.decrypt` passive layer (Layer A), `SourceBuffer.appendBuffer` + `URL.createObjectURL` hooks (Layer B fallback), auto-seek preload, track identity/dedupe, in-page .m4a/.webm assembly |
 | `bridge.js` | ISOLATED-world relay: popup commands into the page, tracks metadata out |
-| `background.js` | Daily count, `FREE_DAILY_LIMIT = 5`, license stub |
+| `background.js` | Capture on/off state, content-script re-injection into open Suno tabs |
 | `popup.html` / `popup.js` | Toolbar panel: capture toggle, track list, save / download-all |
 | `help.html` | Usage + privacy notes |
 | `rea-finding-ledger.md` | REA finding ledger for the Suno Downloader analysis |
