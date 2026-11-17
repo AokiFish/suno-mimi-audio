@@ -142,4 +142,8 @@ chrome.runtime.onMessage.addListener(function (msg) {
   if (msg.type === 'save-failed') refresh();
 });
 
+var fastBox = document.getElementById('fast-capture');
+chrome.storage.local.get(['autoSeek'], function (r) { fastBox.checked = !(r && r.autoSeek === false); }); // default ON
+fastBox.addEventListener('change', function () { chrome.storage.local.set({ autoSeek: fastBox.checked }); });
+
 refresh();

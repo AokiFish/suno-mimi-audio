@@ -208,7 +208,7 @@
   // clicking play/pause of the SAME song yields no title and won't split it.
   function openSession() {
     if (activeTrackId && tracks[activeTrackId]) {
-      finalizeTrack(tracks[activeTrackId]);
+      finalizeTrack(tracks[activeTrackId], true);
     }
     activeTrackId = null;
   }
@@ -357,10 +357,47 @@
   // feeding this song" (switch / seek / EOS / quiet), NOT "the song played to
   // the end". No coverage gate: short/early switches still give a full file
   // because Suno buffers the whole track into MSE within seconds of play.
-  function finalizeTrack(tr) {
+  // Provable completeness, used when fast capture is OFF (the player then only
+  // buffers a little ahead of the playhead, so "no new data for a while" does
+  // NOT mean the song is complete). Complete = the player signalled end of
+  // stream, or every segment of the timeline has been appended.
+  function noteSegTime(tr, mt) {
+    var a = tr._mts || (tr._mts = []);
+    a.push(mt);
+    a.sort(function (x, y) { return x - y; });
+    var m = 0;
+    for (var i = 1; i < a.length; i++) {
+      var g = a[i] - a[i - 1];
+      if (g > 0 && (m === 0 || g < m)) m = g;
+    }
+    tr.segLen = m;
+  }
+  function timingKnown(tr) {
+    return !!(tr.duration && tr.timescale && tr.maxMediaTime >= 0 && tr.source !== 'blob');
+  }
+  function isComplete(tr) {
+    if (tr.eos) return true;
+    if (tr.source === 'blob') return true;
+    if (!timingKnown(tr) || !tr.segLen || !tr._mts) return false;
+    var expected = Math.ceil((tr.duration * 0.98) / tr.segLen);
+    return tr._mts.length >= expected && (tr.maxMediaTime + tr.segLen) >= tr.duration * 0.98;
+  }
+
+  // forced = the player moved on (song switched): decide now. Otherwise (quiet
+  // timer) a not-yet-complete track keeps waiting when fast capture is off.
+  function finalizeTrack(tr, forced) {
     if (!tr || tr.status !== 'Capturing' || tr.bytes <= 0) return;
     if (tr._warming) return; // don't finish while waiting for the preload seek
+    if (!autoSeek && timingKnown(tr) && !isComplete(tr)) {
+      if (!forced) return; // still buffering normally: keep waiting
+      tr.status = 'Incomplete'; // switched away before the song was fully buffered
+      tr.endedAt = Date.now();
+      clearTimer(tr);
+      postUpdate();
+      return;
+    }
     tr.status = 'Ready to save';
+    tr.complete = isComplete(tr);
     tr.endedAt = Date.now();
     clearTimer(tr);
     postUpdate();
@@ -465,7 +502,7 @@
       active._seekDone = true;
       sbToSession.set(sb, active.id);
       if (timing) { active.duration = timing.duration; active.timescale = timing.timescale; }
-      if (active.status !== 'Capturing' && active.status !== 'Incomplete') {
+      if (active.status !== 'Capturing' && active.status !== 'Incomplete' && !active.complete) {
         active.status = 'Capturing'; // reopen if quiet timer had finished it
         active.endedAt = 0;
       }
@@ -499,12 +536,12 @@
         return;
       }
       // A different song starts: close the previous one.
-      if (active && active.status === 'Capturing') finalizeTrack(active);
+      if (active && active.status === 'Capturing') finalizeTrack(active, true);
     }
 
     // No current song (or it was explicitly switched away) => new song.
     if (tr && isInit && tr.sawMedia) {
-      finalizeTrack(tr);
+      finalizeTrack(tr, true);
       sbToSession.delete(sb);
       tr = null;
     }
@@ -531,8 +568,9 @@
       // already appended; keeping both would repeat that audio in the file.
       if (mt >= 0) {
         tr._seen = tr._seen || {};
-        if (tr._seen[mt]) { armQuietTimer(tr); return; }
+        if (tr._seen[mt]) return; // duplicate: must not reset the quiet timer
         tr._seen[mt] = 1;
+        noteSegTime(tr, mt);
       }
       if (mt > tr.maxMediaTime) tr.maxMediaTime = mt;
       if (mt >= 0) tr.sawMedia = true;
@@ -542,6 +580,7 @@
     tr.bytes += buf.byteLength;
     onFirstMediaSegment(tr);
     armQuietTimer(tr);
+    if (!autoSeek && isComplete(tr)) finalizeTrack(tr);
     if (preSeek && tr === seekTrack) armRestore(900); // buffering done ~0.9 s after the last segment
     postUpdate();
   }
@@ -553,7 +592,8 @@
       var id = sbToSession.get(sb);
       var tr = id ? tracks[id] : null;
       if (tr && tr.status === 'Capturing' && tr.bytes > 0) {
-        finalizeTrack(tr);
+        tr.eos = true; // the player says every segment has been appended
+        finalizeTrack(tr, true);
         changed = true;
       }
     });
@@ -640,7 +680,7 @@
   // exactly what a user does by dragging the slider to the end. We replicate
   // that by setting the media element's currentTime. This uses only the
   // player's own buffering path; no network/API/decrypt/download changes.
-  var autoSeek = true;            // on by default; matches "no need to wait"
+  var autoSeek = true;            // ON by default: jump ahead so the player buffers the whole song. Popup checkbox "Fast capture" can turn it off.
   var seekAttempts = 0;
   var seekTrack = null;           // track we are trying to preload
   var SEEK_MAX_TRIES = 16;        // retry while duration is still unknown
@@ -923,6 +963,8 @@
         order = order.filter(function (x) { return x !== id; });
         postUpdate();
       }
+    } else if (d.type === 'set-auto-seek') {
+      autoSeek = !!d.value;
     } else if (d.type === 'request-tracks') {
       postUpdate();
     } else if (d.type === 'save-track') {
