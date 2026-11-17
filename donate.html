@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mimi Audio — Donate</title>
+<style>
+  body {
+    margin: 0;
+    background: #f7f6f0;
+    color: #454a40;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 48px 24px 64px; }
+  .logo {
+    width: 64px; height: 64px;
+    border-radius: 13px;
+    display: block;
+    margin-bottom: 28px;
+  }
+  .eyebrow {
+    margin: 0 0 12px;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #8a8f7a;
+    font-weight: 600;
+  }
+  h1 {
+    margin: 0 0 18px;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 40px;
+    font-weight: 400;
+    line-height: 1.15;
+    letter-spacing: .2px;
+    color: #163a26;
+  }
+  .lede { margin: 0 0 40px; color: #5f6459; font-size: 15px; }
+  .lede strong { color: #454a40; }
+  h2 {
+    margin: 34px 0 14px;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 21px;
+    font-weight: 400;
+    color: #163a26;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+  }
+  .qr {
+    background: #fff;
+    border: 1px solid #e6e4d8;
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+  .qr img {
+    width: 100%;
+    max-width: 240px;
+    height: auto;
+    display: block;
+    margin: 0 auto 10px;
+    border-radius: 8px;
+  }
+  .qr .name { font-weight: 600; color: #163a26; font-size: 14px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<img class="logo" src="icons/icon.svg" alt="Mimi Audio logo">
+<p class="eyebrow">Donate</p>
+<h1>Buy me a coffee</h1>
+<p class="lede"><strong>Mimi Audio is free and open source. If it helped you, you can buy me a coffee — your support keeps the project going.</strong></p>
+
+<h2>WeChat</h2>
+<div class="grid">
+  <div class="qr">
+    <img src="assets/donate-wechat.png" alt="WeChat Pay QR code">
+    <div class="name">WeChat Pay</div>
+  </div>
+</div>
+
+<h2>Crypto (USDT / USDC)</h2>
+<div class="grid">
+  <div class="qr">
+    <img src="assets/donate-usdt-bsc.jpg" alt="USDT on BSC QR code">
+    <div class="name">USDT · BSC (BEP-20)</div>
+  </div>
+  <div class="qr">
+    <img src="assets/donate-usdc-bsc.jpg" alt="USDC on BSC QR code">
+    <div class="name">USDC · BSC (BEP-20)</div>
+  </div>
+  <div class="qr">
+    <img src="assets/donate-usdc-sol.jpg" alt="USDC on Solana QR code">
+    <div class="name">USDC · Solana</div>
+  </div>
+</div>
+</div>
+</body>
+</html>
