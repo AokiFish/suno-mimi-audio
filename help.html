@@ -37,6 +37,7 @@
     color: #163a26;
   }
   .lede { margin: 0 0 40px; color: #5f6459; font-size: 15px; }
+  .lede strong { color: #454a40; }
   h2 {
     margin: 34px 0 14px;
     font-family: Georgia, "Times New Roman", serif;
@@ -44,41 +45,54 @@
     font-weight: 400;
     color: #163a26;
   }
-  ol { margin: 0; padding-left: 22px; }
+  ol, ul { margin: 0; padding-left: 22px; }
   li { margin-bottom: 10px; }
   strong { color: #163a26; }
   p { margin: 0 0 14px; }
+  .qa { margin-bottom: 20px; }
+  .qa p { margin: 0; }
 </style>
 </head>
 <body>
 <div class="wrap">
 <img class="logo" src="icons/icon.svg" alt="Mimi Audio logo">
-<p class="eyebrow">Mimi Audio</p>
-<h1>Play. Capture. Keep.</h1>
-<p class="lede">A small companion for saving complete audio from your Suno playback.</p>
+<p class="eyebrow">Help</p>
+<h1>Mimi Audio</h1>
+<p class="lede"><strong>Play, capture, and save. Easily save complete audio from your Suno playback.</strong></p>
 
-<h2>Your first capture</h2>
+<h2>First-Time Setup</h2>
 <ol>
-<li>After installing, reload your Suno tab once. Allow the extension to run on Suno if your browser asks.</li>
-<li>Keep <strong>Capture is on</strong> enabled in the extension popup, then start a song.</li>
-<li>Open Mimi Audio from the browser toolbar. Wait for <strong>Ready to save</strong>.</li>
-<li>Edit the filename if you like and click <strong>Save audio</strong>. Your browser controls the save location.</li>
+<li>After installing the extension, reload Suno and allow the extension to run on Suno if prompted.</li>
+<li>Open the extension popup, turn on <strong>Keep Capturing</strong>, then play or create a song.</li>
+<li>Click <strong>Mimi Audio</strong> in your browser toolbar and wait until the audio is ready.</li>
+<li>Edit the filename if needed, then click <strong>Save Audio</strong>. Your browser will handle the download location.</li>
 </ol>
 
-<h2>A few things to know</h2>
-<p>Captures belong to the Suno tab where you played the songs. Keep that tab open until you have saved them. A reload clears its captures.</p>
-<p>The pause switch stops capturing new playback. Existing captures stay available and any capture already in progress can finish. Your on/off preference applies to all Suno tabs and is remembered.</p>
-<p>Up to eight tracks, each at most 64 MiB, can be held at once. Remove a track with the × button, or use Clear all to release the captured copies.</p>
+<h2>Important Notes</h2>
+<ul>
+<li>Captures belong to the Suno tab where the audio was played. Keep that tab open until you save your tracks.</li>
+<li>Reloading the page may clear existing captures.</li>
+<li>Turning capture off only stops new captures. Existing tracks remain available, and ongoing captures can finish. The toggle applies to all Suno tabs and is remembered automatically.</li>
+<li>Up to 8 tracks can be saved at once, with a maximum size of 64 MiB per track.</li>
+<li>Click <strong>X</strong> to remove an individual track, or <strong>Clear All</strong> to remove all captured copies.</li>
+</ul>
 
-<h2>If a track does not appear</h2>
-<p>Switch to another song, then play the desired song again. A track loaded before capture was enabled may be cached. If necessary, reload Suno while capture is on and then play the song.</p>
-<p>If the popup cannot connect, check that you are on suno.com and that the extension has permission to run there. Reload the tab after installing or updating the extension.</p>
-<p>An incomplete response cannot be repaired into a complete track. Retry playback for a fresh capture. Changes to Suno's player, media host, or use of Workers may require an extension update.</p>
+<h2>Troubleshooting</h2>
+<div class="qa">
+<p><strong>A track isn't showing up?</strong></p>
+<p>Switch to another song, then play the desired song again. Tracks loaded before capture was enabled may be cached. If necessary, enable capture, reload Suno, and play the song again.</p>
+</div>
+<div class="qa">
+<p><strong>The extension can't connect?</strong></p>
+<p>Make sure you're on <strong>suno.com</strong> and that the extension has permission to run on the site. After installing or updating the extension, reload the Suno tab.</p>
+</div>
+<div class="qa">
+<p><strong>The captured audio is incomplete?</strong></p>
+<p>Incomplete captures cannot be repaired. Play the song again to create a new capture.</p>
+</div>
 
-<h2>What stays on your computer</h2>
-<p>Audio is held in the page's memory until you save it. Playback keys stay in that page and are never exported. Only the on/off preference is stored by the extension.</p>
-<p>There are no uploads, analytics, login-token reads, or additional license or download requests. Filenames and capture status are shown in the popup. The extension does not call Suno's download menu.</p>
-<p>Mimi Audio is an independent local tool, not an official Suno extension.</p>
+<h2>Future Compatibility</h2>
+<p>Changes to Suno's player, media hosts, or Workers may require an extension update.</p>
 </div>
 </body>
 </html>
