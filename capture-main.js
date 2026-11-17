@@ -39,6 +39,7 @@
   var sbToSession = new WeakMap(); // SourceBuffer -> session id
   var DUP_SINK = '__dup__'; // SourceBuffer replaying an already-held song: ignore its media
   var msToSbs = new WeakMap(); // MediaSource -> [SourceBuffer]
+  var tombstoneInits = []; // init signatures of tracks superseded by the network layer
 
   function shortId() {
     var s = '';
@@ -476,6 +477,13 @@
     var sig = isInit ? initSig(buf) : '';
     var timing = isInit ? parseInitTiming(buf) : null;
 
+    // The network layer superseded this song: a re-init (e.g. from the
+    // fallback seek) must not respawn a duplicate track.
+    if (isInit && sig && tombstoneInits.indexOf(sig) >= 0) {
+      sbToSession.set(sb, DUP_SINK);
+      return;
+    }
+
     var id = sbToSession.get(sb);
     var tr = id ? tracks[id] : null;
 
@@ -554,7 +562,27 @@
       tr = newSession();
       if (!tr) return;
       sbToSession.set(sb, tr.id);
-      if (isInit) { activeTrackId = tr.id; scheduleMediaTitle(tr); }
+      if (isInit) {
+        // Pre-link identity: if the active track is a just-created moonlit
+        // track (the network layer captured this song before its MSE stream
+        // started), or a moonlit track already carries the exact same title,
+        // bind them so the gate adopts instead of duplicating.
+        var prevActive = activeTrackId ? tracks[activeTrackId] : null;
+        if (prevActive && prevActive.source === 'moonlit' &&
+            Date.now() - prevActive.startedAt < 10000) {
+          tr.linkedClip = prevActive.clipId;
+        } else if (tr.named && tr.title) {
+          for (var li = 0; li < order.length; li++) {
+            var lt = tracks[order[li]];
+            if (lt && lt.source === 'moonlit' && lt.title === tr.title) {
+              tr.linkedClip = lt.clipId;
+              break;
+            }
+          }
+        }
+        activeTrackId = tr.id;
+        scheduleMediaTitle(tr);
+      }
     }
     if (tr.status !== 'Capturing') return;
     if (tr.bytes + buf.byteLength > MAX_BYTES) {
@@ -664,12 +692,32 @@
         if (obj instanceof Blob && captureOn) {
           var t = (obj.type || '').toLowerCase();
           if (t.indexOf('audio/') === 0 || (t === '' && obj.size >= 1048576)) {
+            // The fetch+decrypt layer usually delivers the same song seconds
+            // earlier: never keep two complete copies of one track.
+            var recentMoonlit = null;
+            for (var mi = 0; mi < order.length; mi++) {
+              var mt = tracks[order[mi]];
+              if (mt && mt.source === 'moonlit' && Date.now() - mt.startedAt < 10000) { recentMoonlit = mt; break; }
+            }
+            if (recentMoonlit) return url;
             var tr = newSession();
             if (tr) {
               tr.source = 'blob';
               tr.chunks = [obj];
               tr.bytes = obj.size;
               tr.status = 'Ready to save';
+              // The blob being handed over IS the song the player is playing
+              // right now: fold the in-flight MSE copy into this one.
+              var at = activeTrackId ? tracks[activeTrackId] : null;
+              if (at && at.source === 'mse' && at.status === 'Capturing') {
+                if (!tr.named && at.named && at.title) { tr.title = at.title; tr.named = true; }
+                if (at.initSig && tombstoneInits.indexOf(at.initSig) < 0) tombstoneInits.push(at.initSig);
+                if (tombstoneInits.length > 32) tombstoneInits.shift();
+                clearTimer(at);
+                delete tracks[at.id];
+                order = order.filter(function (x) { return x !== at.id; });
+              }
+              activeTrackId = tr.id;
               postUpdate();
             }
           }
@@ -716,12 +764,20 @@
   }
 
   // A full decrypted clip arrived: register it as a Ready track and drop any
-  // MSE track of the same song (same mvhd duration + timescale = same song).
+  // MSE track of the same song. Identity is decided by the decrypt-side LINK
+  // (the player decrypted this exact clip while this MSE track was active),
+  // falling back to mvhd duration + timescale. Duration alone is NOT enough:
+  // Suno's streaming init segment often carries an unknown (0xFFFFFFFF)
+  // duration, which is why the old duration-only check let duplicates live.
   function moonlitReady(clipId, pt, ext) {
     if (!captureOn) return;
     var fmt = sniffFormat(pt);
     if (!fmt) return;
     var timing = parseInitTiming(pt);
+    for (var k = 0; k < order.length; k++) {
+      var e = tracks[order[k]];
+      if (e && e.source === 'moonlit' && e.clipId === clipId) return; // already held
+    }
     var m = newSession();
     if (!m) {
       // The moonlit copy is already complete: it must not be lost. Evict the
@@ -752,8 +808,12 @@
     for (var j = order.length - 1; j >= 0; j--) {
       var t = tracks[order[j]];
       if (!t || t === m || t.source !== 'mse') continue;
-      if (m.duration && t.duration && m.timescale === t.timescale && m.duration === t.duration) {
+      var sameSong = (t.linkedClip === clipId) ||
+        (m.duration && t.duration && m.timescale === t.timescale && m.duration === t.duration);
+      if (sameSong) {
         if (!m.named && t.named && t.title) { m.title = t.title; m.named = true; }
+        if (t.initSig && tombstoneInits.indexOf(t.initSig) < 0) tombstoneInits.push(t.initSig);
+        if (tombstoneInits.length > 32) tombstoneInits.shift();
         clearTimer(t);
         delete tracks[t.id];
         order = order.filter(function (x) { return x !== t.id; });
@@ -763,11 +823,12 @@
   }
 
   function moonlitHasMatch(tr) {
-    if (!moonlitOK || !tr || !tr.duration) return false;
+    if (!moonlitOK || !tr) return null;
     for (var i = 0; i < order.length; i++) {
       var t = tracks[order[i]];
-      if (t && t.source === 'moonlit' && t.duration === tr.duration &&
-          t.timescale === tr.timescale) return t;
+      if (!t || t.source !== 'moonlit') continue;
+      if ((tr.linkedClip && t.clipId === tr.linkedClip) ||
+          (tr.duration && t.duration === tr.duration && t.timescale === tr.timescale)) return t;
     }
     return null;
   }
@@ -778,6 +839,8 @@
     var m = moonlitHasMatch(tr);
     if (!m) return;
     if (!m.named && tr.named && tr.title) { m.title = tr.title; m.named = true; }
+    if (tr.initSig && tombstoneInits.indexOf(tr.initSig) < 0) tombstoneInits.push(tr.initSig);
+    if (tombstoneInits.length > 32) tombstoneInits.shift();
     clearTimer(tr);
     delete tracks[tr.id];
     order = order.filter(function (x) { return x !== tr.id; });
@@ -835,7 +898,8 @@
         for (var z = out.length - 65536; z < out.length; z++) { if (out[z] !== 0) { zeros = false; break; } }
         if (zeros) return; // zero-filled tail = truncated response, useless
       }
-      ciphers.set(id, { data: out, ext: match[2].toLowerCase(), state: 'waiting for key' });
+      ciphers.set(id, { data: out, ext: match[2].toLowerCase(), state: 'waiting for key',
+                        clipId: id, linkedTrackId: null });
       if (ciphers.size > MAX_CIPHERS) {
         var oldest = ciphers.keys().next().value;
         if (oldest !== id) ciphers.delete(oldest);
@@ -886,6 +950,17 @@
                 playbackKeys.delete(playbackKeys.keys().next().value);
               }
               playbackKeys.set(sig, { key: key, counter: counter, length: length });
+              // The player is decrypting a clip we captured: LINK the current
+              // MSE track to that clip. This is the reliable song identity —
+              // mvhd duration in streaming init segments is often unknown.
+              ciphers.forEach(function (c) {
+                if (c.linkedTrackId || headFp(c.data) !== sig) return;
+                var at = activeTrackId ? tracks[activeTrackId] : null;
+                if (at && at.source === 'mse' && at.status === 'Capturing') {
+                  c.linkedTrackId = at.id;
+                  at.linkedClip = c.clipId;
+                }
+              });
               var ids = [];
               ciphers.forEach(function (c, cid) { if (c.state === 'waiting for key') ids.push(cid); });
               for (var q = 0; q < ids.length; q++) tryMoonlitDecrypt(ids[q]);
@@ -1011,10 +1086,22 @@
     if (moonlitOK && moonlitHasMatch(tr)) { adoptMoonlitMatch(tr); return; }
     tr._warming = true; // suppress the quiet timer while we decide
     clearTimer(tr);
-    setTimeout(function () {
+    var decide = function () {
       tr._warming = false;
       if (tracks[tr.id] !== tr) return; // dropped: the network layer got it
       if (moonlitOK && moonlitHasMatch(tr)) { adoptMoonlitMatch(tr); return; }
+      // A captured cipher is linked to THIS song but not decrypted yet:
+      // give the network layer more time before touching the player.
+      var pending = false;
+      ciphers.forEach(function (c) {
+        if (c.linkedTrackId === tr.id && (c.state === 'waiting for key' || c.state === 'decrypting')) pending = true;
+      });
+      if (pending && (tr._gateRetries || 0) < 2) {
+        tr._gateRetries = (tr._gateRetries || 0) + 1;
+        tr._warming = true;
+        setTimeout(function () { decide(); }, 5000);
+        return;
+      }
       if (!autoSeek) { armQuietTimer(tr); return; }
       // Fallback: nudge the player to buffer the whole song.
       var key = tr.initSig || (tr.duration + ':' + tr.timescale) || '';
@@ -1026,7 +1113,8 @@
       seekTrack = tr;
       seekToEnd();
       if (tr.status === 'Capturing') armQuietTimer(tr);
-    }, moonlitOK ? MOONLIT_WAIT_MS : SEEK_WARMUP_MS);
+    };
+    setTimeout(function () { decide(); }, moonlitOK ? MOONLIT_WAIT_MS : SEEK_WARMUP_MS);
   }
 
   // Our own download blobs must NOT go through the createObjectURL hook:
@@ -1144,7 +1232,7 @@
       var url = rawObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
-      a.download = (filename || tr.title || 'Suno track').replace(/[\\/:*?"<>|]/g, '-') + '.m4a';
+      a.download = (filename || tr.title || 'Suno track').replace(/[\\/:*?"<>|]/g, '-') + '.' + (tr.extension || 'm4a');
       document.body.appendChild(a);
       a.click();
       a.remove();
