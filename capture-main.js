@@ -413,6 +413,7 @@
 
   function clearTimer(tr) {
     if (tr.timer) { clearTimeout(tr.timer); tr.timer = null; }
+    if (tr._gateTimer) { clearTimeout(tr._gateTimer); tr._gateTimer = null; }
   }
 
   function copyBytes(data) {
@@ -545,6 +546,10 @@
       sbToSession.delete(sb);
       tr = null;
     }
+    // A media segment whose track no longer exists (evicted, superseded by
+    // the network layer) must not spawn a junk track: MSE always appends the
+    // init segment first, so media-only appends belong to a dead session.
+    if (!tr && !isInit) return;
     if (!tr) {
       tr = newSession();
       if (!tr) return;
@@ -674,7 +679,231 @@
     };
   } catch (e) { /* ignore */ }
 
-  // --- Auto preload: nudge the player to buffer the whole song ---
+  // --- Layer A: passive network + key observation (moonlit-style) ---
+  // Suno's progressive path fetches the WHOLE encrypted clip in one response
+  // and decrypts it in page JS with AES-CTR. Listen on both, touch nothing:
+  // clone the response (the player's own promise is returned untouched) and
+  // observe decrypt calls to learn the key, then decrypt the full ciphertext
+  // ourselves. Zero player interaction => zero pause. If this layer delivers
+  // a complete file for the current song, the MSE track is dropped and the
+  // auto-seek fallback never fires. If it cannot (streaming path, Worker
+  // decrypt, partial response), the MSE layer + auto-seek still cover it.
+  var moonlitOK = false;
+  var MOONLIT_WAIT_MS = 6000;   // how long to wait for the network layer before fallback seek
+  var MAX_CIPHERS = 8;
+  var subtle = (window.crypto && window.crypto.subtle) || null;
+  var origFetch = null, origDecrypt = null, decryptDesc = null;
+  var playbackKeys = new Map(); // ciphertext-head fingerprint -> {key, counter, length}
+  var ciphers = new Map();      // clip id -> {data, ext, state}
+
+  function u8view(v) {
+    return ArrayBuffer.isView(v)
+      ? new Uint8Array(v.buffer, v.byteOffset, v.byteLength)
+      : new Uint8Array(v);
+  }
+  function headFp(v) {
+    var b = u8view(v), s = '';
+    for (var i = 0; i < 16 && i < b.length; i++) s += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+    return s;
+  }
+  function sniffFormat(v) {
+    var b = u8view(v);
+    if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70)
+      return { ext: 'm4a', mime: 'audio/mp4' };
+    if (b.length >= 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3)
+      return { ext: 'webm', mime: 'audio/webm' };
+    return null;
+  }
+
+  // A full decrypted clip arrived: register it as a Ready track and drop any
+  // MSE track of the same song (same mvhd duration + timescale = same song).
+  function moonlitReady(clipId, pt, ext) {
+    if (!captureOn) return;
+    var fmt = sniffFormat(pt);
+    if (!fmt) return;
+    var timing = parseInitTiming(pt);
+    var m = newSession();
+    if (!m) {
+      // The moonlit copy is already complete: it must not be lost. Evict the
+      // oldest in-flight MSE track to make room.
+      for (var i = 0; i < order.length; i++) {
+        var t0 = tracks[order[i]];
+        if (t0 && t0.source === 'mse') {
+          clearTimer(t0);
+          delete tracks[t0.id];
+          order = order.filter(function (x) { return x !== t0.id; });
+          break;
+        }
+      }
+      m = newSession();
+      if (!m) return;
+    }
+    m.source = 'moonlit';
+    m.clipId = clipId;
+    m.chunks = [pt.buffer.slice(pt.byteOffset, pt.byteOffset + pt.byteLength)];
+    m.bytes = pt.byteLength;
+    m.status = 'Ready to save';
+    m.complete = true;
+    m.extension = ext || fmt.ext;
+    if (timing) { m.duration = timing.duration; m.timescale = timing.timescale; }
+    activeTrackId = m.id;
+    scheduleMediaTitle(m);
+    // The same song may also be streaming via MSE: keep one copy only.
+    for (var j = order.length - 1; j >= 0; j--) {
+      var t = tracks[order[j]];
+      if (!t || t === m || t.source !== 'mse') continue;
+      if (m.duration && t.duration && m.timescale === t.timescale && m.duration === t.duration) {
+        if (!m.named && t.named && t.title) { m.title = t.title; m.named = true; }
+        clearTimer(t);
+        delete tracks[t.id];
+        order = order.filter(function (x) { return x !== t.id; });
+      }
+    }
+    postUpdate();
+  }
+
+  function moonlitHasMatch(tr) {
+    if (!moonlitOK || !tr || !tr.duration) return false;
+    for (var i = 0; i < order.length; i++) {
+      var t = tracks[order[i]];
+      if (t && t.source === 'moonlit' && t.duration === tr.duration &&
+          t.timescale === tr.timescale) return t;
+    }
+    return null;
+  }
+
+  // The network layer just proved it covers the song the MSE layer was
+  // capturing: drop the MSE copy (transfer its name if it had one).
+  function adoptMoonlitMatch(tr) {
+    var m = moonlitHasMatch(tr);
+    if (!m) return;
+    if (!m.named && tr.named && tr.title) { m.title = tr.title; m.named = true; }
+    clearTimer(tr);
+    delete tracks[tr.id];
+    order = order.filter(function (x) { return x !== tr.id; });
+    if (activeTrackId === tr.id) activeTrackId = m.id;
+    postUpdate();
+  }
+
+  function tryMoonlitDecrypt(id) {
+    var c = ciphers.get(id);
+    if (!c || c.state !== 'waiting for key' || !origDecrypt) return;
+    var pk = playbackKeys.get(headFp(c.data));
+    if (!pk) return;
+    c.state = 'decrypting';
+    origDecrypt.call(subtle, { name: 'AES-CTR', counter: pk.counter, length: pk.length }, pk.key, c.data)
+      .then(function (pt) {
+        ciphers.delete(id);
+        moonlitReady(id, new Uint8Array(pt), c.ext);
+      })
+      .catch(function () { c.state = 'waiting for key'; });
+  }
+
+  function moonlitCapture(response, request) {
+    if (!captureOn || !response || !response.ok) return;
+    var url;
+    try { url = new URL(response.url || (request && request.url) || String(request || ''), location.href); }
+    catch (e) { return; }
+    var host = url.hostname;
+    if (!/(^|\.)suno\.(com|ai)$/i.test(host) && host !== 'd2lwuy8qc234o3.cloudfront.net') return;
+    var match = url.pathname.match(/\/clip\/([0-9a-f-]{36})\.(m4a|mp4|webm)$/i);
+    if (!match) return;
+    var id = match[1];
+    for (var i = 0; i < order.length; i++) {
+      var t = tracks[order[i]];
+      if (t && t.source === 'moonlit' && t.clipId === id) return; // already held
+    }
+    if (ciphers.has(id)) return;
+    var range = response.headers.get('content-range');
+    if (response.status === 206 || range) {
+      var r = range ? range.match(/^bytes (\d+)-(\d+)\/(\d+)$/i) : null;
+      // Only a full response (byte 0 through the end) can be reassembled.
+      if (!r || Number(r[1]) !== 0 || Number(r[2]) + 1 !== Number(r[3])) return;
+    }
+    var clone = response.clone();
+    if (!clone.body) return;
+    var reader = clone.body.getReader();
+    var chunks = [], received = 0;
+    var stop = function () { try { reader.cancel(); } catch (e) { /* ignore */ } };
+    var finish = function () {
+      if (received < 16) return;
+      var out = new Uint8Array(received), off = 0;
+      for (var j = 0; j < chunks.length; j++) { out.set(chunks[j], off); off += chunks[j].byteLength; }
+      chunks = [];
+      if (received >= 65536) {
+        var zeros = true;
+        for (var z = out.length - 65536; z < out.length; z++) { if (out[z] !== 0) { zeros = false; break; } }
+        if (zeros) return; // zero-filled tail = truncated response, useless
+      }
+      ciphers.set(id, { data: out, ext: match[2].toLowerCase(), state: 'waiting for key' });
+      if (ciphers.size > MAX_CIPHERS) {
+        var oldest = ciphers.keys().next().value;
+        if (oldest !== id) ciphers.delete(oldest);
+      }
+      tryMoonlitDecrypt(id);
+    };
+    (function pump() {
+      reader.read().then(function (res) {
+        if (!captureOn) { stop(); return; }
+        if (res.done) { finish(); return; }
+        received += res.value.byteLength;
+        if (received > MAX_BYTES) { stop(); return; }
+        chunks.push(res.value);
+        pump();
+      }).catch(function () {});
+    })();
+  }
+
+  // Install the passive hooks. Both wrappers return the ORIGINAL result
+  // synchronously; all observation happens in promise callbacks, so the
+  // player never waits for us.
+  try {
+    if (subtle && subtle.decrypt) {
+      origFetch = window.fetch;
+      origDecrypt = subtle.decrypt;
+      decryptDesc = Object.getOwnPropertyDescriptor(subtle, 'decrypt');
+      window.fetch = function () {
+        var result = origFetch.apply(this, arguments);
+        var req = arguments[0];
+        try {
+          result.then(function (resp) {
+            try { moonlitCapture(resp, req); } catch (e) { /* ignore */ }
+          }).catch(function () {});
+        } catch (e) { /* ignore */ }
+        return result;
+      };
+      subtle.decrypt = function () {
+        var result = origDecrypt.apply(this, arguments);
+        try {
+          var algo = arguments[0], key = arguments[1], input = arguments[2];
+          if (algo && String(algo.name).toUpperCase() === 'AES-CTR' && input) {
+            var sig = headFp(input);
+            var counter = u8view(algo.counter).slice();
+            var length = algo.length;
+            result.then(function (pt) {
+              if (!captureOn || !sniffFormat(pt)) return;
+              if (!playbackKeys.has(sig) && playbackKeys.size >= 16) {
+                playbackKeys.delete(playbackKeys.keys().next().value);
+              }
+              playbackKeys.set(sig, { key: key, counter: counter, length: length });
+              var ids = [];
+              ciphers.forEach(function (c, cid) { if (c.state === 'waiting for key') ids.push(cid); });
+              for (var q = 0; q < ids.length; q++) tryMoonlitDecrypt(ids[q]);
+            }).catch(function () {});
+          }
+        } catch (e) { /* observation must not interrupt playback */ }
+        return result;
+      };
+      moonlitOK = window.fetch !== origFetch && subtle.decrypt !== origDecrypt;
+      if (!moonlitOK) { // browser refused the hooks: restore, fall back to MSE only
+        window.fetch = origFetch;
+        if (decryptDesc) Object.defineProperty(subtle, 'decrypt', decryptDesc);
+        else try { delete subtle.decrypt; } catch (e) { /* ignore */ }
+      }
+    }
+  } catch (e) { moonlitOK = false; }
+
+  // --- Auto preload: nudge the player to buffer the whole song (FALLBACK) ---
   // Suno's player buffers lazily (only the part near the playhead, ~0.5-0.7 MB).
   // Seeking near the end makes it append the remaining segments immediately —
   // exactly what a user does by dragging the slider to the end. We replicate
@@ -769,47 +998,35 @@
     setTimeout(seekToEnd, SEEK_RETRY_MS);
   }
 
-  // Start seeking once the first media segment of a song arrives. Reset the
-  // attempt counter for each new session (new song).
+  // Start capture handling once the first media segment of a song arrives.
+  // With the passive network layer active we WAIT first: if it delivers the
+  // complete file, the MSE track is dropped and the player is never touched
+  // (no pause). Only when that fails within the wait window do we fall back
+  // to the preload seek (pause + jump to end + restore).
   function onFirstMediaSegment(tr) {
-    if (!autoSeek || !captureOn) return;
+    if (!captureOn) return;
+    if (!moonlitOK && !autoSeek) return; // fully passive, old behaviour
     if (tr._seekDone) return;
     tr._seekDone = true;
-    // If we just seeked this same song moments ago, don't do it again even if
-    // a fresh track somehow appeared — this is the last defense against the
-    // seek -> re-init -> new-track loop.
-    var key = tr.initSig || (tr.duration + ':' + tr.timescale) || '';
-    var now = Date.now();
-    if (key && key === lastSeekSig && (now - lastSeekAt) < SEEK_THROTTLE_MS) return;
-    lastSeekSig = key;
-    lastSeekAt = now;
-    seekAttempts = 0;
-    seekTrack = tr;
-    // Warm up: let the player append segments normally for a few seconds so
-    // its MediaSource pipeline is stable, THEN seek. Suppress the quiet timer
-    // during warmup so the track isn't finalized before the seek happens.
-    tr._warming = true;
+    if (moonlitOK && moonlitHasMatch(tr)) { adoptMoonlitMatch(tr); return; }
+    tr._warming = true; // suppress the quiet timer while we decide
     clearTimer(tr);
     setTimeout(function () {
       tr._warming = false;
-      // The user already switched songs: never touch the player now (the
-      // media element belongs to the NEW song). Keep what was captured, but
-      // do not offer a truncated file as a finished one.
-      if (activeTrackId !== tr.id) {
-        var cov = coverage(tr);
-        if (tr.status === 'Capturing' && cov >= 0 && cov < 0.9) {
-          tr.status = 'Incomplete';
-          clearTimer(tr);
-          postUpdate();
-        } else if (tr.status === 'Capturing') {
-          armQuietTimer(tr);
-        }
-        return;
-      }
+      if (tracks[tr.id] !== tr) return; // dropped: the network layer got it
+      if (moonlitOK && moonlitHasMatch(tr)) { adoptMoonlitMatch(tr); return; }
+      if (!autoSeek) { armQuietTimer(tr); return; }
+      // Fallback: nudge the player to buffer the whole song.
+      var key = tr.initSig || (tr.duration + ':' + tr.timescale) || '';
+      var now = Date.now();
+      if (key && key === lastSeekSig && (now - lastSeekAt) < SEEK_THROTTLE_MS) { armQuietTimer(tr); return; }
+      lastSeekSig = key;
+      lastSeekAt = now;
+      seekAttempts = 0;
+      seekTrack = tr;
       seekToEnd();
-      // If the seek never produced new appends, let the quiet timer finish it.
       if (tr.status === 'Capturing') armQuietTimer(tr);
-    }, SEEK_WARMUP_MS);
+    }, moonlitOK ? MOONLIT_WAIT_MS : SEEK_WARMUP_MS);
   }
 
   // Our own download blobs must NOT go through the createObjectURL hook:
@@ -951,6 +1168,8 @@
       tracks = {};
       order = [];
       sbToSession = new WeakMap();
+      ciphers.clear();
+      playbackKeys.clear();
       lastSeekSig = '';
       lastSeekAt = 0;
       activeTrackId = null;

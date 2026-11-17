@@ -25,10 +25,21 @@ cannot install into your browser for you.
   order they form a valid fragmented MP4, saved as `.m4a`. A second hook on
   `URL.createObjectURL` catches the player's progressive path, which builds
   one whole decrypted audio Blob and hands it to an `<audio>` element.
-- The first build hooked `fetch`/`XMLHttpRequest` instead. That was the bug:
+- The first build hooked `fetch`/`XMLHttpRequest` alone. That was the bug:
   it grabbed the encrypted stream bytes (no ftyp/moov, entropy 7.99996
   bit/byte, length not a multiple of 16). The save step and the file assembly
-  were never the problem. No fetch/XHR audio capture remains.
+  were never the problem.
+- Since 2026-11-17 capture is dual-layer. Layer A (primary, zero player
+  interaction, no pause): hook `fetch` (clone the response, read the whole
+  ENCRYPTED clip in the background) and hook `crypto.subtle.decrypt`
+  (observe the player's own AES-CTR call to learn the key), then decrypt the
+  full ciphertext ourselves. Layer B (fallback): the existing MSE
+  `appendBuffer` capture of plaintext segments. When a new song starts via
+  MSE, the extension waits up to 6 s for Layer A to deliver the complete
+  file; if it does, the MSE track is dropped and the player is never touched.
+  Only if Layer A fails (streaming path, Worker decrypt, partial response)
+  does the auto-seek fallback fire (pause + jump to end + restore), which is
+  why that path can briefly pause playback.
 - A track is Ready to save when the player calls `MediaSource.endOfStream`,
   or when no new segment arrives for 8 seconds after segments started
   arriving. A song is only a few MB; in practice the segments arrive within
