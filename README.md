@@ -8,9 +8,6 @@ service of third-party platforms, infringes copyright, or breaks applicable
 laws. All captured audio belongs to its respective rights holders. Use at
 your own risk; the authors assume no liability for any misuse.
 
-> 本项目仅供技术研究和学习使用，禁止用于商业用途或任何违反第三方平台服务条款、
-> 侵犯版权或法律法规的用途。所捕获音频的版权归各自权利人所有。使用风险自负。
-
 Original code, built from Mimi Audio's observed behavior (its help text and
 UI screenshots). No Mimi or Suno Downloader source was copied — their source
 was never available to read.
